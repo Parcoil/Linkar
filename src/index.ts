@@ -29,11 +29,23 @@ if (!token || !clientId || !guildId || !dropboxToken) {
   throw new Error("❌ Missing required environment variables.");
 }
 
+const maxLinks = 4;
+const linkCooldown = 12 * 60 * 60 * 1000;
+
 let linkHistoryCache: any = {};
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages],
   partials: [Partials.Channel, Partials.Message, Partials.User],
+  presence: {
+    activities: [
+      {
+        name: "lunaar.org",
+        type: 0,
+      },
+    ],
+    status: "dnd",
+  },
 });
 
 const commands = [
@@ -63,8 +75,23 @@ async function loadLinkHistoryFromDropbox(): Promise<void> {
 
     if (response.ok) {
       const data = await response.text();
-      linkHistoryCache = JSON.parse(data);
-      console.log("✅ Link history loaded from Dropbox");
+
+      if (!data || data.trim() === "") {
+        console.log("🔍 Empty link history file found, starting fresh");
+        linkHistoryCache = {};
+        return;
+      }
+
+      try {
+        linkHistoryCache = JSON.parse(data);
+        console.log("✅ Link history loaded from Dropbox");
+      } catch (parseError) {
+        console.error("❌ Failed to parse link history JSON:", parseError);
+        console.log("🔄 Initializing fresh link history cache");
+        linkHistoryCache = {};
+
+        await saveLinkHistoryToDropbox();
+      }
     } else if (response.status === 409) {
       linkHistoryCache = {};
       console.log("🔍 No existing link history found, starting fresh");
@@ -72,10 +99,10 @@ async function loadLinkHistoryFromDropbox(): Promise<void> {
       console.error(
         `❌ Failed to load link history: ${response.status} ${response.statusText}`
       );
+      linkHistoryCache = {};
     }
   } catch (err) {
     console.error("❌ Error loading link history:", err);
-
     linkHistoryCache = {};
   }
 }
@@ -112,28 +139,94 @@ async function saveLinkHistoryToDropbox(): Promise<void> {
   }
 }
 
-async function getRandomUniqueLink(userId: string): Promise<string | null> {
+function getRemainingCooldownTime(userId: string): number {
+  if (!linkHistoryCache[userId] || !linkHistoryCache[userId].history) {
+    return 0;
+  }
+
+  const lastLinkTime = linkHistoryCache[userId].lastPeriodStartTime || 0;
+  const currentTime = Date.now();
+
+  const timeSincePeriodStart = currentTime - lastLinkTime;
+
+  if (timeSincePeriodStart >= linkCooldown) {
+    return 0;
+  }
+
+  return linkCooldown - timeSincePeriodStart;
+}
+
+function formatCooldownTime(milliseconds: number): string {
+  const hours = Math.floor(milliseconds / (1000 * 60 * 60));
+  const minutes = Math.floor((milliseconds % (1000 * 60 * 60)) / (1000 * 60));
+
+  return `${hours} hours and ${minutes} minutes`;
+}
+
+function getUserLinkCount(userId: string): number {
+  if (
+    !linkHistoryCache[userId] ||
+    !linkHistoryCache[userId].currentPeriodCount
+  ) {
+    return 0;
+  }
+  return linkHistoryCache[userId].currentPeriodCount;
+}
+
+async function getRandomUniqueLink(
+  userId: string
+): Promise<string | { error: string }> {
   const links = readFileSync("./links.txt", "utf-8")
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
 
   if (!linkHistoryCache[userId]) {
-    linkHistoryCache[userId] = [];
+    linkHistoryCache[userId] = {
+      history: [],
+      currentPeriodCount: 0,
+      lastPeriodStartTime: Date.now(),
+    };
+  }
+
+  const currentTime = Date.now();
+  const lastLinkTime = linkHistoryCache[userId].lastPeriodStartTime || 0;
+  const timeSincePeriodStart = currentTime - lastLinkTime;
+
+  if (timeSincePeriodStart >= linkCooldown) {
+    linkHistoryCache[userId].currentPeriodCount = 0;
+    linkHistoryCache[userId].lastPeriodStartTime = currentTime;
+  }
+
+  if (linkHistoryCache[userId].currentPeriodCount >= maxLinks) {
+    const cooldownTimeRemaining = getRemainingCooldownTime(userId);
+    return {
+      error: `you have already received ${maxLinks} links in the last 12 hours. Please try again in ${formatCooldownTime(
+        cooldownTimeRemaining
+      )}.`,
+    };
   }
 
   const availableLinks = links.filter(
-    (link) => !linkHistoryCache[userId].includes(link)
+    (link) => !linkHistoryCache[userId].history.includes(link)
   );
 
   if (availableLinks.length === 0) {
-    return null;
+    return {
+      error:
+        "You have already received all available links. Please check back later.",
+    };
   }
 
   const randomLink =
     availableLinks[Math.floor(Math.random() * availableLinks.length)];
 
-  linkHistoryCache[userId].push(randomLink);
+  linkHistoryCache[userId].history.push(randomLink);
+  linkHistoryCache[userId].currentPeriodCount++;
+
+  if (linkHistoryCache[userId].currentPeriodCount === 1) {
+    linkHistoryCache[userId].lastPeriodStartTime = currentTime;
+  }
 
   await saveLinkHistoryToDropbox();
 
@@ -166,7 +259,9 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   ) {
     const embed = new EmbedBuilder()
       .setTitle("Lunaar Link Generator")
-      .setDescription("Click the button below to receive a link in your DMs.")
+      .setDescription(
+        "Click the button below to receive a link in your DMs.\n\n*Limited to 2 links per 12 hours.*"
+      )
       .setColor(0x5865f2);
 
     const button = new ButtonBuilder()
@@ -185,29 +280,35 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       await interaction.deferReply({ ephemeral: true });
 
       const userId = interaction.user.id;
-      const randomLink = await getRandomUniqueLink(userId);
+      const randomLinkResult = await getRandomUniqueLink(userId);
       const getLunaarEmoji = client.emojis.cache.get("1369509638956908674");
       const lunaarEmoji = getLunaarEmoji?.toString();
 
-      if (!randomLink) {
+      if (typeof randomLinkResult === "object" && randomLinkResult.error) {
         await interaction.editReply({
-          content:
-            "❌ You have already received all available links. Please check back later.",
+          content: `❌ ${randomLinkResult.error}`,
         });
         return;
       }
 
+      const randomLink = randomLinkResult as string;
+
       try {
         await interaction.user.send(
-          `${lunaarEmoji} Here's your [Lunaar link](${randomLink}) ${lunaarEmoji}`
+          `${lunaarEmoji} Here's your new [Lunaar link](${randomLink}) Do not share it ${lunaarEmoji}`
         );
 
+        const linksUsed = getUserLinkCount(userId);
+        const remainingLinks = maxLinks - linksUsed;
+
         await interaction.editReply({
-          content: "✅ Check your DMs",
+          content: `✅ Check your DMs! You have ${remainingLinks} link${
+            remainingLinks !== 1 ? "s" : ""
+          } remaining for the next 12 hours.`,
         });
 
         console.log(
-          `User ${interaction.user.tag} (${userId}) has received ${linkHistoryCache[userId].length} unique links`
+          `User ${interaction.user.tag} (${userId}) has received ${linkHistoryCache[userId].history.length} total links (${linksUsed}/${maxLinks} in current period)`
         );
       } catch (err) {
         console.error("Failed to send DM:", err);
