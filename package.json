@@ -1,0 +1,26 @@
+{
+  "name": "link-dispenser",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "npm run build && node dist/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.8.0",
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "discord.js": "^14.19.3",
+    "dotenv": "^16.5.0",
+    "node-fetch": "^3.3.2",
+    "tsx": "^4.19.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.14",
+    "typescript": "^5.8.3"
+  }
+}
