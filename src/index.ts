@@ -17,12 +17,12 @@ import {
   Message,
 } from "discord.js";
 import { readFileSync } from "fs";
-import { token, clientId, guildId } from "@/lib/exports";
+import { token, clientId, guildId } from "./lib/exports";
 import chalk from "chalk";
 import {
   loadLinkHistoryFromJsonBin,
   saveLinkHistoryToJsonBin,
-} from "@/jsonbin";
+} from "./jsonbin";
 
 if (!token || !clientId || !guildId || !process.env.LOG_WEBHOOK_URL) {
   throw new Error("❌ Missing required environment variables.");
@@ -156,7 +156,10 @@ client.on(Events.MessageCreate, async (message: Message) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-  if (interaction.isChatInputCommand() && interaction.commandName === "sendlinkembed") {
+  if (
+    interaction.isChatInputCommand() &&
+    interaction.commandName === "sendlinkembed"
+  ) {
     const embed = new EmbedBuilder()
       .setTitle("Lunaar Link Generator")
       .setDescription(
@@ -174,7 +177,8 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     return;
   }
 
-  if (!interaction.isButton() || interaction.customId !== "lunaar_button") return;
+  if (!interaction.isButton() || interaction.customId !== "lunaar_button")
+    return;
 
   const userTag = interaction.user.tag;
   const userId = interaction.user.id;
@@ -204,7 +208,6 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   const dmContent = `${emoji} Here's your new [Lunaar link](${link}) Do not share it ${emoji}`;
   await interaction.user.send(dmContent);
   await logWebhook.send(`✉️ Sent DM to ${userTag}: "${dmContent}"`);
-
 });
 
 client.login(token);
