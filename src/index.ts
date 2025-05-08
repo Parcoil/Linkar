@@ -12,38 +12,36 @@ import {
   ActionRowBuilder,
   Interaction,
   PermissionFlagsBits,
+  WebhookClient,
+  ChannelType,
+  Message,
 } from "discord.js";
 import { readFileSync } from "fs";
-import fetch from "node-fetch";
-import dotenv from "dotenv";
+import { token, clientId, guildId } from "@/lib/exports";
 import chalk from "chalk";
+import {
+  loadLinkHistoryFromJsonBin,
+  saveLinkHistoryToJsonBin,
+} from "@/jsonbin";
 
-dotenv.config();
-
-const token = process.env.DISCORD_TOKEN;
-const clientId = process.env.CLIENT_ID;
-const guildId = process.env.GUILD_ID;
-const dropboxToken = process.env.DROPBOX_TOKEN;
-
-if (!token || !clientId || !guildId || !dropboxToken) {
+if (!token || !clientId || !guildId || !process.env.LOG_WEBHOOK_URL) {
   throw new Error("❌ Missing required environment variables.");
 }
 
+const logWebhook = new WebhookClient({ url: process.env.LOG_WEBHOOK_URL! });
 const maxLinks = 4;
-const linkCooldown = 12 * 60 * 60 * 1000;
-
-let linkHistoryCache: any = {};
+const linkCooldown = 2 * 60 * 60 * 1000;
+let linkHistoryCache: Record<string, any> = {};
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.MessageContent,
+  ],
   partials: [Partials.Channel, Partials.Message, Partials.User],
   presence: {
-    activities: [
-      {
-        name: "lunaar.org",
-        type: 0,
-      },
-    ],
+    activities: [{ name: "lunaar.org", type: 0 }],
     status: "dnd",
   },
 });
@@ -58,119 +56,20 @@ const commands = [
 
 const rest = new REST({ version: "10" }).setToken(token);
 
-async function loadLinkHistoryFromDropbox(): Promise<void> {
-  try {
-    const response = await fetch(
-      "https://content.dropboxapi.com/2/files/download",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${dropboxToken}`,
-          "Dropbox-API-Arg": JSON.stringify({
-            path: "/link_history.json",
-          }),
-        },
-      }
-    );
-
-    if (response.ok) {
-      const data = await response.text();
-
-      if (!data || data.trim() === "") {
-        console.log("🔍 Empty link history file found, starting fresh");
-        linkHistoryCache = {};
-        return;
-      }
-
-      try {
-        linkHistoryCache = JSON.parse(data);
-        console.log("✅ Link history loaded from Dropbox");
-      } catch (parseError) {
-        console.error("❌ Failed to parse link history JSON:", parseError);
-        console.log("🔄 Initializing fresh link history cache");
-        linkHistoryCache = {};
-
-        await saveLinkHistoryToDropbox();
-      }
-    } else if (response.status === 409) {
-      linkHistoryCache = {};
-      console.log("🔍 No existing link history found, starting fresh");
-    } else {
-      console.error(
-        `❌ Failed to load link history: ${response.status} ${response.statusText}`
-      );
-      linkHistoryCache = {};
-    }
-  } catch (err) {
-    console.error("❌ Error loading link history:", err);
-    linkHistoryCache = {};
-  }
-}
-
-async function saveLinkHistoryToDropbox(): Promise<void> {
-  try {
-    const response = await fetch(
-      "https://content.dropboxapi.com/2/files/upload",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${dropboxToken}`,
-          "Dropbox-API-Arg": JSON.stringify({
-            path: "/link_history.json",
-            mode: "overwrite",
-          }),
-          "Content-Type": "application/octet-stream",
-        },
-        body: JSON.stringify(linkHistoryCache),
-      }
-    );
-
-    if (response.ok) {
-      console.log(chalk.green("✅ Link history saved to Dropbox"));
-    } else {
-      console.error(
-        chalk.red(
-          `❌ Failed to save link history: ${response.status} ${response.statusText}`
-        )
-      );
-    }
-  } catch (err) {
-    console.error(chalk.red("❌ Error saving link history:"), err);
-  }
-}
-
 function getRemainingCooldownTime(userId: string): number {
-  if (!linkHistoryCache[userId] || !linkHistoryCache[userId].history) {
-    return 0;
-  }
-
-  const lastLinkTime = linkHistoryCache[userId].lastPeriodStartTime || 0;
-  const currentTime = Date.now();
-
-  const timeSincePeriodStart = currentTime - lastLinkTime;
-
-  if (timeSincePeriodStart >= linkCooldown) {
-    return 0;
-  }
-
-  return linkCooldown - timeSincePeriodStart;
+  const last = linkHistoryCache[userId]?.lastPeriodStartTime || 0;
+  const since = Date.now() - last;
+  return since >= linkCooldown ? 0 : linkCooldown - since;
 }
 
-function formatCooldownTime(milliseconds: number): string {
-  const hours = Math.floor(milliseconds / (1000 * 60 * 60));
-  const minutes = Math.floor((milliseconds % (1000 * 60 * 60)) / (1000 * 60));
-
-  return `${hours} hours and ${minutes} minutes`;
+function formatCooldownTime(ms: number): string {
+  const hrs = Math.floor(ms / (1000 * 60 * 60));
+  const mins = Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60));
+  return `${hrs} hours and ${mins} minutes`;
 }
 
 function getUserLinkCount(userId: string): number {
-  if (
-    !linkHistoryCache[userId] ||
-    !linkHistoryCache[userId].currentPeriodCount
-  ) {
-    return 0;
-  }
-  return linkHistoryCache[userId].currentPeriodCount;
+  return linkHistoryCache[userId]?.currentPeriodCount || 0;
 }
 
 async function getRandomUniqueLink(
@@ -189,48 +88,40 @@ async function getRandomUniqueLink(
     };
   }
 
-  const currentTime = Date.now();
-  const lastLinkTime = linkHistoryCache[userId].lastPeriodStartTime || 0;
-  const timeSincePeriodStart = currentTime - lastLinkTime;
-
-  if (timeSincePeriodStart >= linkCooldown) {
+  const now = Date.now();
+  const last = linkHistoryCache[userId].lastPeriodStartTime;
+  if (now - last >= linkCooldown) {
     linkHistoryCache[userId].currentPeriodCount = 0;
-    linkHistoryCache[userId].lastPeriodStartTime = currentTime;
+    linkHistoryCache[userId].lastPeriodStartTime = now;
   }
 
   if (linkHistoryCache[userId].currentPeriodCount >= maxLinks) {
-    const cooldownTimeRemaining = getRemainingCooldownTime(userId);
     return {
-      error: `you have already received ${maxLinks} links in the last 12 hours. Please try again in ${formatCooldownTime(
-        cooldownTimeRemaining
+      error: `you have already received ${maxLinks} links in the last 2 hours. Please try again in ${formatCooldownTime(
+        getRemainingCooldownTime(userId)
       )}.`,
     };
   }
 
-  const availableLinks = links.filter(
-    (link) => !linkHistoryCache[userId].history.includes(link)
+  const available = links.filter(
+    (l) => !linkHistoryCache[userId].history.includes(l)
   );
-
-  if (availableLinks.length === 0) {
+  if (available.length === 0) {
     return {
       error:
         "You have already received all available links. Please check back later.",
     };
   }
 
-  const randomLink =
-    availableLinks[Math.floor(Math.random() * availableLinks.length)];
-
-  linkHistoryCache[userId].history.push(randomLink);
+  const choice = available[Math.floor(Math.random() * available.length)];
+  linkHistoryCache[userId].history.push(choice);
   linkHistoryCache[userId].currentPeriodCount++;
-
   if (linkHistoryCache[userId].currentPeriodCount === 1) {
-    linkHistoryCache[userId].lastPeriodStartTime = currentTime;
+    linkHistoryCache[userId].lastPeriodStartTime = now;
   }
 
-  await saveLinkHistoryToDropbox();
-
-  return randomLink;
+  await saveLinkHistoryToJsonBin(linkHistoryCache);
+  return choice;
 }
 
 (async () => {
@@ -239,11 +130,11 @@ async function getRandomUniqueLink(
       body: commands,
     });
     console.log(chalk.green("✅ Slash command registered."));
-
-    await loadLinkHistoryFromDropbox();
+    linkHistoryCache = await loadLinkHistoryFromJsonBin();
   } catch (err) {
     console.error(
-      chalk.red("❌ Failed to register commands or load link history:", err)
+      chalk.red("❌ Failed to register commands or load link history:"),
+      err
     );
   }
 })();
@@ -252,86 +143,68 @@ client.once(Events.ClientReady, () => {
   console.log(chalk.blue(`✅ Logged in as ${client.user?.tag}`));
 });
 
+client.on(Events.MessageCreate, async (message: Message) => {
+  if (message.author.bot) return;
+  if (message.channel.type === ChannelType.DM) {
+    const userTag = message.author.tag;
+    const userId = message.author.id;
+    const content = message.content || "[embed/attachment]";
+    await logWebhook.send(
+      `📩 DM received from ${userTag} (${userId}):\n${content}`
+    );
+  }
+});
+
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-  if (
-    interaction.isChatInputCommand() &&
-    interaction.commandName === "sendlinkembed"
-  ) {
+  if (interaction.isChatInputCommand() && interaction.commandName === "sendlinkembed") {
     const embed = new EmbedBuilder()
       .setTitle("Lunaar Link Generator")
       .setDescription(
-        "Click the button below to receive a link in your DMs.\n\n*Limited to 2 links per 12 hours.*"
+        "Click the button below to receive a link in your DMs.\n\n*Limited to 4 links per 2 hours.*"
       )
       .setColor(0x5865f2);
-
     const button = new ButtonBuilder()
       .setCustomId("lunaar_button")
       .setLabel("Lunaar Links")
       .setEmoji("1369509638956908674")
       .setStyle(ButtonStyle.Primary);
-
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(button);
-
     await interaction.reply({ embeds: [embed], components: [row] });
+    await logWebhook.send(`↩️ sendlinkembed used by ${interaction.user.tag}`);
+    return;
   }
 
-  if (interaction.isButton() && interaction.customId === "lunaar_button") {
-    try {
-      await interaction.deferReply({ ephemeral: true });
+  if (!interaction.isButton() || interaction.customId !== "lunaar_button") return;
 
-      const userId = interaction.user.id;
-      const randomLinkResult = await getRandomUniqueLink(userId);
-      const getLunaarEmoji = client.emojis.cache.get("1369509638956908674");
-      const lunaarEmoji = getLunaarEmoji?.toString();
+  const userTag = interaction.user.tag;
+  const userId = interaction.user.id;
 
-      if (typeof randomLinkResult === "object" && randomLinkResult.error) {
-        await interaction.editReply({
-          content: `❌ ${randomLinkResult.error}`,
-        });
-        return;
-      }
+  await logWebhook.send(`🔘 Button clicked by ${userTag} (${userId})`);
+  await interaction.deferReply({ ephemeral: true });
+  const result = await getRandomUniqueLink(userId);
 
-      const randomLink = randomLinkResult as string;
-
-      try {
-        await interaction.user.send(
-          `${lunaarEmoji} Here's your new [Lunaar link](${randomLink}) Do not share it ${lunaarEmoji}`
-        );
-
-        const linksUsed = getUserLinkCount(userId);
-        const remainingLinks = maxLinks - linksUsed;
-
-        await interaction.editReply({
-          content: `✅ Check your DMs! You have ${remainingLinks} link${
-            remainingLinks !== 1 ? "s" : ""
-          } remaining for the next 12 hours.`,
-        });
-
-        console.log(
-          `User ${interaction.user.tag} (${userId}) has received ${linkHistoryCache[userId].history.length} total links (${linksUsed}/${maxLinks} in current period)`
-        );
-      } catch (err) {
-        console.error("Failed to send DM:", err);
-        await interaction.editReply({
-          content:
-            "❌ I couldn't send you a DM. Please check your dm / privacy settings and try again.",
-        });
-      }
-    } catch (err) {
-      console.error(err);
-
-      if (interaction.deferred) {
-        await interaction.editReply({
-          content: `❌ Failed to send DM. Error: ${err}`,
-        });
-      } else {
-        await interaction.reply({
-          content: `❌ Failed to send DM. Error: ${err}`,
-          ephemeral: true,
-        });
-      }
-    }
+  if (typeof result === "object" && result.error) {
+    await interaction.editReply({ content: `❌ ${result.error}` });
+    await logWebhook.send(
+      `↩️ Replied to ${userTag} with error: ${result.error}`
+    );
+    return;
   }
+
+  const link = result as string;
+  const remaining = maxLinks - getUserLinkCount(userId);
+  const replyContent = `✅ Check your DMs! You have ${remaining} link${
+    remaining !== 1 ? "s" : ""
+  } remaining for the next 2 hours.`;
+  await interaction.editReply({ content: replyContent });
+  await logWebhook.send(`↩️ Replied to ${userTag}: "${replyContent}"`);
+
+  const emoji =
+    client.emojis.cache.get("1369509638956908674")?.toString() ?? "";
+  const dmContent = `${emoji} Here's your new [Lunaar link](${link}) Do not share it ${emoji}`;
+  await interaction.user.send(dmContent);
+  await logWebhook.send(`✉️ Sent DM to ${userTag}: "${dmContent}"`);
+
 });
 
 client.login(token);
